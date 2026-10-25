@@ -1,0 +1,20 @@
+{
+    "2": {
+        "name": "At-Risk / Needs Intervention",
+        "tier": "Low Performance",
+        "color": "#e74c3c",
+        "recommendation": "Academic counseling, remedial sessions, mandatory attendance tracking, peer tutoring."
+    },
+    "0": {
+        "name": "Moderate / Consistent Performers",
+        "tier": "Average Performance",
+        "color": "#f39c12",
+        "recommendation": "Targeted problem-solving workshops, time-management mentoring, regular quiz practice."
+    },
+    "1": {
+        "name": "High Achievers / Distinction",
+        "tier": "Top Performance",
+        "color": "#27ae60",
+        "recommendation": "Advanced electives, competitive exam preparation, research mini-projects, mentoring peers."
+    }
+}

@@ -1,0 +1,353 @@
+import json
+import os
+
+notebook_content = {
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# 🎓 Machine Learning Mini Project: Student Performance Clustering\n",
+    "\n",
+    "**Course / Subject:** Machine Learning / Data Mining  \n",
+    "**Algorithm:** K-Means Clustering (Unsupervised Learning)  \n",
+    "**Features:** Attendance (%), Internal Marks (/100), Assignment Marks (/100), Study Hours (hrs/week)  \n",
+    "**Difficulty:** Easy  \n",
+    "\n",
+    "---\n",
+    "\n",
+    "## 📌 1. Problem Statement & Objectives\n",
+    "Identifying student academic trends early allows institutions to intervene proactively rather than reactively. In this notebook, we group students into distinct behavioral performance clusters without predefined labels, uncovering hidden patterns in attendance, exam performance, coursework completion, and independent study habits."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 📦 2. Import Required Libraries"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "import matplotlib.pyplot as plt\n",
+    "import seaborn as sns\n",
+    "\n",
+    "from sklearn.preprocessing import StandardScaler\n",
+    "from sklearn.cluster import KMeans, AgglomerativeClustering\n",
+    "from sklearn.mixture import GaussianMixture\n",
+    "from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score\n",
+    "from sklearn.decomposition import PCA\n",
+    "\n",
+    "# Set visual style\n",
+    "sns.set_theme(style=\"whitegrid\", palette=\"muted\")\n",
+    "plt.rcParams.update({'font.sans-serif': 'DejaVu Sans', 'font.size': 11})\n",
+    "print(\"All libraries imported successfully!\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 📊 3. Dataset Loading & Inspection"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# Load dataset from local data folder\n",
+    "data_path = \"../data/student_data.csv\"\n",
+    "if not os.path.exists(data_path):\n",
+    "    data_path = \"data/student_data.csv\"\n",
+    "\n",
+    "df = pd.read_csv(data_path)\n",
+    "print(f\"Dataset Shape: {df.shape[0]} students, {df.shape[1]} columns\\n\")\n",
+    "display(df.head())\n",
+    "display(df.describe().round(2))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 📈 4. Exploratory Data Analysis (EDA)\n",
+    "Let's visualize the distribution of each academic metric and their correlation."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "feature_cols = [\"Attendance\", \"Internal_Marks\", \"Assignment_Marks\", \"Study_Hours\"]\n",
+    "\n",
+    "# Feature Distributions\n",
+    "fig, axes = plt.subplots(2, 2, figsize=(12, 8))\n",
+    "for i, col in enumerate(feature_cols):\n",
+    "    ax = axes[i // 2, i % 2]\n",
+    "    sns.histplot(df[col], kde=True, ax=ax, color=\"#2b5c8f\", bins=20)\n",
+    "    ax.set_title(f\"Distribution of {col}\", fontweight=\"bold\")\n",
+    "plt.tight_layout()\n",
+    "plt.show()\n",
+    "\n",
+    "# Correlation Heatmap\n",
+    "plt.figure(figsize=(7, 5))\n",
+    "sns.heatmap(df[feature_cols].corr(), annot=True, cmap=\"Blues\", fmt=\".2f\", linewidths=1)\n",
+    "plt.title(\"Correlation Matrix of Academic Features\", fontweight=\"bold\")\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## ⚖️ 5. Feature Scaling (StandardScaler)\n",
+    "**Why is scaling essential?**  \n",
+    "K-Means computes Euclidean distances between data points. Since `Study_Hours` spans $1-40$ while marks and attendance span $0-100$, unscaled features would allow marks to disproportionately dominate distance calculations. StandardScaler transforms all features to $\\mu=0, \\sigma=1$."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "X = df[feature_cols].copy()\n",
+    "scaler = StandardScaler()\n",
+    "X_scaled = scaler.fit_transform(X)\n",
+    "\n",
+    "print(\"Scaled features sample (first 3 rows):\")\n",
+    "print(X_scaled[:3].round(3))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 🎯 6. Determining Optimal Clusters ($K$)\n",
+    "We evaluate two mathematical criteria across $K \\in [1, 8]$:\n",
+    "1. **The Elbow Method (Inertia / WCSS):** Measures cluster compactness.\n",
+    "2. **Silhouette Score:** Evaluates cohesion vs separation (higher is better)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "k_range = range(1, 9)\n",
+    "inertia = []\n",
+    "sil_scores = []\n",
+    "\n",
+    "for k in k_range:\n",
+    "    km = KMeans(n_clusters=k, random_state=42, n_init=10)\n",
+    "    km.fit(X_scaled)\n",
+    "    inertia.append(km.inertia_)\n",
+    "    if k >= 2:\n",
+    "        sil_scores.append((k, silhouette_score(X_scaled, km.labels_)))\n",
+    "\n",
+    "fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))\n",
+    "\n",
+    "# Elbow plot\n",
+    "ax1.plot(list(k_range), inertia, marker='o', linewidth=2.5, color='#1f77b4')\n",
+    "ax1.axvline(x=3, color='#e74c3c', linestyle='--', label='Elbow Point (K=3)')\n",
+    "ax1.set_title(\"Elbow Method (WCSS vs K)\", fontweight=\"bold\")\n",
+    "ax1.set_xlabel(\"Number of Clusters (K)\")\n",
+    "ax1.set_ylabel(\"Inertia (WCSS)\")\n",
+    "ax1.legend()\n",
+    "\n",
+    "# Silhouette plot\n",
+    "k_vals, s_vals = zip(*sil_scores)\n",
+    "ax2.bar(k_vals, s_vals, color='#2ca02c', alpha=0.85, width=0.5)\n",
+    "ax2.set_title(\"Silhouette Score by K\", fontweight=\"bold\")\n",
+    "ax2.set_xlabel(\"Number of Clusters (K)\")\n",
+    "ax2.set_ylabel(\"Silhouette Score\")\n",
+    "for x, y in zip(k_vals, s_vals):\n",
+    "    ax2.text(x, y + 0.015, f\"{y:.3f}\", ha='center', fontsize=9)\n",
+    "\n",
+    "plt.tight_layout()\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 🚀 7. Training K-Means ($K=3$) & Profiling Performance Groups"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "optimal_k = 3\n",
+    "kmeans = KMeans(n_clusters=optimal_k, random_state=42, n_init=15)\n",
+    "df[\"Cluster_Raw\"] = kmeans.fit_predict(X_scaled)\n",
+    "\n",
+    "# Compute average metrics per cluster to dynamically label them\n",
+    "cluster_means = df.groupby(\"Cluster_Raw\")[feature_cols].mean()\n",
+    "composite = cluster_means[\"Attendance\"] + cluster_means[\"Internal_Marks\"] + cluster_means[\"Assignment_Marks\"]\n",
+    "sorted_ids = composite.sort_values().index.tolist()\n",
+    "\n",
+    "label_map = {\n",
+    "    sorted_ids[0]: \"At-Risk / Needs Intervention\",\n",
+    "    sorted_ids[1]: \"Moderate / Consistent Performers\",\n",
+    "    sorted_ids[2]: \"High Achievers / Distinction\"\n",
+    "}\n",
+    "\n",
+    "df[\"Performance_Group\"] = df[\"Cluster_Raw\"].map(label_map)\n",
+    "\n",
+    "summary = df.groupby(\"Performance_Group\")[feature_cols].mean().round(1)\n",
+    "summary[\"Student_Count\"] = df.groupby(\"Performance_Group\")[\"Student_ID\"].count()\n",
+    "display(summary)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 🗺️ 8. Dimensionality Reduction (PCA 2D Projection)\n",
+    "We reduce the 4 features into 2 Principal Components to visually examine cluster boundaries and centroids."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "pca = PCA(n_components=2, random_state=42)\n",
+    "pca_coords = pca.fit_transform(X_scaled)\n",
+    "df[\"PC1\"] = pca_coords[:, 0]\n",
+    "df[\"PC2\"] = pca_coords[:, 1]\n",
+    "\n",
+    "exp_var = pca.explained_variance_ratio_ * 100\n",
+    "print(f\"Total Variance Explained by 2 Components: {sum(exp_var):.2f}%\\n\")\n",
+    "\n",
+    "plt.figure(figsize=(10, 6))\n",
+    "colors = {\"At-Risk / Needs Intervention\": \"#e74c3c\", \"Moderate / Consistent Performers\": \"#f39c12\", \"High Achievers / Distinction\": \"#27ae60\"}\n",
+    "\n",
+    "for group, color in colors.items():\n",
+    "    sub = df[df[\"Performance_Group\"] == group]\n",
+    "    plt.scatter(sub[\"PC1\"], sub[\"PC2\"], label=f\"{group} (n={len(sub)})\", color=color, alpha=0.75, edgecolors='k', linewidth=0.5, s=60)\n",
+    "\n",
+    "# Plot Centroids\n",
+    "centroids_pca = pca.transform(kmeans.cluster_centers_)\n",
+    "plt.scatter(centroids_pca[:, 0], centroids_pca[:, 1], marker='X', color='black', s=200, edgecolors='white', linewidth=2, label='Cluster Centroids', zorder=10)\n",
+    "\n",
+    "plt.title(\"Student Performance Clusters (2D PCA Space)\", fontsize=14, fontweight=\"bold\")\n",
+    "plt.xlabel(f\"Principal Component 1 ({exp_var[0]:.1f}% Variance)\")\n",
+    "plt.ylabel(f\"Principal Component 2 ({exp_var[1]:.1f}% Variance)\")\n",
+    "plt.legend(frameon=True, facecolor='white')\n",
+    "plt.tight_layout()\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 🏆 9. Algorithm Comparison (K-Means vs Agglomerative vs GMM)\n",
+    "We benchmark K-Means against other major clustering paradigms using Silhouette, Davies-Bouldin, and Calinski-Harabasz metrics."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "algorithms = {\n",
+    "    \"K-Means\": KMeans(n_clusters=3, random_state=42, n_init=10),\n",
+    "    \"Agglomerative (Hierarchical)\": AgglomerativeClustering(n_clusters=3, linkage='ward'),\n",
+    "    \"Gaussian Mixture (GMM)\": GaussianMixture(n_components=3, random_state=42)\n",
+    "}\n",
+    "\n",
+    "benchmark = []\n",
+    "for name, model in algorithms.items():\n",
+    "    lbls = model.fit_predict(X_scaled)\n",
+    "    benchmark.append({\n",
+    "        \"Algorithm\": name,\n",
+    "        \"Silhouette Score (Higher Better)\": round(silhouette_score(X_scaled, lbls), 4),\n",
+    "        \"Davies-Bouldin Index (Lower Better)\": round(davies_bouldin_score(X_scaled, lbls), 4),\n",
+    "        \"Calinski-Harabasz Score (Higher Better)\": round(calinski_harabasz_score(X_scaled, lbls), 2)\n",
+    "    })\n",
+    "\n",
+    "display(pd.DataFrame(benchmark))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 🔮 10. Real-Time Student Prediction Function\n",
+    "Let's test classifying a new student who was not part of the training dataset."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": None,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def classify_new_student(attendance, internal_marks, assignment_marks, study_hours):\n",
+    "    new_data = pd.DataFrame([[attendance, internal_marks, assignment_marks, study_hours]], columns=feature_cols)\n",
+    "    new_scaled = scaler.transform(new_data)\n",
+    "    cluster_id = kmeans.predict(new_scaled)[0]\n",
+    "    group_name = label_map[cluster_id]\n",
+    "    \n",
+    "    return {\n",
+    "        \"Assigned Group\": group_name,\n",
+    "        \"Attendance\": f\"{attendance}%\",\n",
+    "        \"Internal Marks\": f\"{internal_marks}/100\",\n",
+    "        \"Assignment Marks\": f\"{assignment_marks}/100\",\n",
+    "        \"Weekly Study Hours\": f\"{study_hours} hrs\"\n",
+    "    }\n",
+    "\n",
+    "# Test student 1: High engagement\n",
+    "print(\"Student 1:\", classify_new_student(attendance=92.0, internal_marks=88.0, assignment_marks=91.0, study_hours=28.0))\n",
+    "\n",
+    "# Test student 2: Needs attention\n",
+    "print(\"Student 2:\", classify_new_student(attendance=50.0, internal_marks=40.0, assignment_marks=42.0, study_hours=5.0))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 🎯 11. Conclusion & Recommendations\n",
+    "1. **Clear Behavioral Segments:** Attendance and self-study hours serve as strong behavioral precursors to exam and assignment performance.\n",
+    "2. **Early Intervention:** Rather than waiting for semester-end results, institutions can flag 'At-Risk' students during midterm evaluations.\n",
+    "3. **Scalability:** K-Means enables near-instantaneous inference for thousands of students with low computational complexity."
+   ]
+  }
+ ],
+ "metadata": {
+  "language_info": {
+   "name": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
+
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+notebook_path = os.path.join(base_dir, "notebooks", "student_performance_clustering.ipynb")
+
+with open(notebook_path, "w", encoding="utf-8") as f:
+    json.dump(notebook_content, f, indent=1)
+
+print(f"Jupyter Notebook successfully written to: {notebook_path}")

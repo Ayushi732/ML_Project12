@@ -1,0 +1,413 @@
+"""
+Modular Machine Learning Engine for Dynamic Student Performance Prediction.
+Supports dynamic dataset ingestion, automatic task detection (Regression vs Classification),
+robust preprocessing pipelines, multi-model training/evaluation, and inference.
+"""
+
+import re
+import numpy as np
+import pandas as pd
+
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
+
+# Regression models
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.tree import DecisionTreeRegressor
+
+# Classification models
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
+
+# Metrics
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report
+)
+
+
+def detect_identifier_columns(df: pd.DataFrame) -> list:
+    """
+    Detect likely identifier/ID columns (e.g. Student_ID, Roll_No, Name, Email)
+    to safely exclude them from default feature selection.
+    """
+    id_pattern = re.compile(r"(?i)(^id$|_id$|id_|student_id|roll|roll_no|rollno|name|email|uuid|index|serial|reg_no|registration)")
+    identified = []
+    
+    for col in df.columns:
+        col_str = str(col).strip()
+        if id_pattern.search(col_str):
+            identified.append(col)
+        elif df[col].dtype == object and df[col].nunique() == len(df) and len(df) > 10:
+            # High cardinality unique string column (likely a unique name or hash)
+            identified.append(col)
+            
+    return identified
+
+
+def detect_task_type(df: pd.DataFrame, target_col: str) -> dict:
+    """
+    Analyzes target column and automatically determines whether the task
+    is Regression (numerical marks/scores) or Classification (grades, pass/fail, tiers).
+    """
+    if target_col not in df.columns:
+        return {"task": "regression", "reason": "Target not found, defaulting to regression"}
+        
+    series = df[target_col].dropna()
+    n_unique = series.nunique()
+    dtype = series.dtype
+    
+    # If non-numeric (string, boolean, category, object) -> Classification
+    if pd.api.types.is_object_dtype(dtype) or pd.api.types.is_string_dtype(dtype) or pd.api.types.is_bool_dtype(dtype) or pd.api.types.is_categorical_dtype(dtype):
+        return {
+            "task": "classification",
+            "n_unique": n_unique,
+            "classes": sorted([str(x) for x in series.unique()[:20]]),
+            "reason": f"Target contains text/categorical values with {n_unique} distinct classes."
+        }
+        
+    # If numeric
+    if pd.api.types.is_numeric_dtype(dtype):
+        # If integer with 10 or fewer unique values (e.g., binary 0/1 or letter grade numbers 1-5)
+        if n_unique <= 7 and np.all(np.equal(np.mod(series.values, 1), 0)):
+            return {
+                "task": "classification",
+                "n_unique": n_unique,
+                "classes": sorted(list(series.unique())),
+                "reason": f"Target is discrete numeric with only {n_unique} unique categories (e.g., encoded classes)."
+            }
+        else:
+            return {
+                "task": "regression",
+                "n_unique": n_unique,
+                "range": (float(series.min()), float(series.max())),
+                "mean": float(series.mean()),
+                "reason": f"Target is continuous numerical (Range: {series.min():.1f} to {series.max():.1f}, {n_unique} unique values)."
+            }
+            
+    return {"task": "regression", "n_unique": n_unique, "reason": "Defaulting to regression based on numeric properties."}
+
+
+def separate_feature_types(df: pd.DataFrame, feature_cols: list) -> tuple:
+    """
+    Separates selected feature columns into numeric and categorical lists.
+    """
+    numeric_cols = []
+    categorical_cols = []
+    
+    for col in feature_cols:
+        if col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                numeric_cols.append(col)
+            else:
+                categorical_cols.append(col)
+                
+    return numeric_cols, categorical_cols
+
+
+def build_preprocessor(numeric_cols: list, categorical_cols: list) -> ColumnTransformer:
+    """
+    Builds a robust scikit-learn ColumnTransformer that handles missing values,
+    scales numerical features, and one-hot encodes categorical features.
+    """
+    transformers = []
+    
+    if numeric_cols:
+        num_pipeline = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler())
+        ])
+        transformers.append(("num", num_pipeline, numeric_cols))
+        
+    if categorical_cols:
+        cat_pipeline = Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
+        ])
+        transformers.append(("cat", cat_pipeline, categorical_cols))
+        
+    return ColumnTransformer(transformers=transformers, remainder="drop")
+
+
+def train_supervised_models(
+    df: pd.DataFrame,
+    feature_cols: list,
+    target_col: str,
+    task_type: str,
+    test_size: float = 0.2,
+    random_state: int = 42
+) -> dict:
+    """
+    End-to-end training and evaluation pipeline.
+    Trains suitable models (Regression or Classification), computes metrics,
+    and returns a trained state dictionary ready for inference.
+    """
+    # 1. Clean data: drop missing target rows
+    clean_df = df.dropna(subset=[target_col]).copy()
+    
+    if len(clean_df) < 10:
+        raise ValueError("The dataset contains fewer than 10 valid records after removing missing targets.")
+        
+    X = clean_df[feature_cols].copy()
+    y = clean_df[target_col].copy()
+    
+    numeric_cols, categorical_cols = separate_feature_types(X, feature_cols)
+    if not numeric_cols and not categorical_cols:
+        raise ValueError("No valid numerical or categorical features selected for training.")
+        
+    # 2. Target Encoding if Classification
+    label_encoder = None
+    target_classes = None
+    
+    if task_type == "classification":
+        y_str = y.astype(str)
+        label_encoder = LabelEncoder()
+        y_encoded = label_encoder.fit_transform(y_str)
+        target_classes = list(label_encoder.classes_)
+        y_final = y_encoded
+    else:
+        # Ensure numerical target
+        y_final = pd.to_numeric(y, errors="coerce")
+        valid_idx = ~y_final.isna()
+        X = X.loc[valid_idx]
+        y_final = y_final.loc[valid_idx].values
+        
+    # 3. Train/Test Split
+    stratify_arg = None
+    if task_type == "classification":
+        # Check if every class has at least 2 instances for stratification
+        class_counts = pd.Series(y_final).value_counts()
+        if (class_counts >= 2).all() and len(class_counts) > 1:
+            stratify_arg = y_final
+            
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y_final, test_size=test_size, random_state=random_state, stratify=stratify_arg
+    )
+    
+    # 4. Models Definition
+    if task_type == "regression":
+        candidate_models = {
+            "Linear Regression": LinearRegression(),
+            "Random Forest Regressor": RandomForestRegressor(n_estimators=100, random_state=random_state),
+            "Decision Tree Regressor": DecisionTreeRegressor(max_depth=6, random_state=random_state)
+        }
+    else:
+        candidate_models = {
+            "Logistic Regression": LogisticRegression(max_iter=1000, random_state=random_state),
+            "Random Forest Classifier": RandomForestClassifier(n_estimators=100, random_state=random_state),
+            "Decision Tree Classifier": DecisionTreeClassifier(max_depth=6, random_state=random_state)
+        }
+        
+    trained_pipelines = {}
+    metrics_records = []
+    predictions_dict = {}
+    
+    # 5. Train each model with independent ColumnTransformer
+    for name, model_estimator in candidate_models.items():
+        preprocessor = build_preprocessor(numeric_cols, categorical_cols)
+        pipeline = Pipeline([
+            ("preprocessor", preprocessor),
+            ("model", model_estimator)
+        ])
+        
+        # Fit on training data ONLY
+        pipeline.fit(X_train, y_train)
+        y_pred = pipeline.predict(X_test)
+        
+        trained_pipelines[name] = pipeline
+        predictions_dict[name] = y_pred
+        
+        if task_type == "regression":
+            mae = mean_absolute_error(y_test, y_pred)
+            mse = mean_squared_error(y_test, y_pred)
+            rmse = float(np.sqrt(mse))
+            r2 = r2_score(y_test, y_pred)
+            
+            metrics_records.append({
+                "Model": name,
+                "MAE (Lower Better)": round(mae, 3),
+                "MSE (Lower Better)": round(mse, 3),
+                "RMSE (Lower Better)": round(rmse, 3),
+                "R2 Score (Higher Better)": round(r2, 4)
+            })
+        else:
+            acc = accuracy_score(y_test, y_pred)
+            prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
+            rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+            f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+            
+            metrics_records.append({
+                "Model": name,
+                "Accuracy": round(acc, 4),
+                "Precision (Weighted)": round(prec, 4),
+                "Recall (Weighted)": round(rec, 4),
+                "F1-Score (Higher Better)": round(f1, 4)
+            })
+            
+    metrics_df = pd.DataFrame(metrics_records)
+    
+    # Determine best model
+    if task_type == "regression":
+        best_model_name = metrics_df.sort_values(by="R2 Score (Higher Better)", ascending=False).iloc[0]["Model"]
+    else:
+        best_model_name = metrics_df.sort_values(by="F1-Score (Higher Better)", ascending=False).iloc[0]["Model"]
+        
+    return {
+        "task_type": task_type,
+        "target_col": target_col,
+        "feature_cols": feature_cols,
+        "numeric_cols": numeric_cols,
+        "categorical_cols": categorical_cols,
+        "pipelines": trained_pipelines,
+        "best_model_name": best_model_name,
+        "metrics_df": metrics_df,
+        "predictions_dict": predictions_dict,
+        "X_train": X_train,
+        "X_test": X_test,
+        "y_train": y_train,
+        "y_test": y_test,
+        "label_encoder": label_encoder,
+        "target_classes": target_classes,
+        "total_trained": len(clean_df),
+        "train_size": len(X_train),
+        "test_size": len(X_test)
+    }
+
+
+def predict_single_student(trained_state: dict, student_input: dict, model_name: str = None) -> dict:
+    """
+    Predicts marks, grade, or pass/fail outcome for an individual student.
+    """
+    if model_name is None or model_name not in trained_state["pipelines"]:
+        model_name = trained_state["best_model_name"]
+        
+    pipeline = trained_state["pipelines"][model_name]
+    feature_cols = trained_state["feature_cols"]
+    
+    # Construct 1-row DataFrame matching the exact training column structure
+    input_df = pd.DataFrame([student_input])
+    for col in feature_cols:
+        if col not in input_df.columns:
+            input_df[col] = np.nan
+            
+    input_df = input_df[feature_cols]
+    
+    raw_pred = pipeline.predict(input_df)[0]
+    probabilities = None
+    
+    if trained_state["task_type"] == "classification":
+        if hasattr(pipeline.named_steps["model"], "predict_proba"):
+            try:
+                proba_array = pipeline.predict_proba(input_df)[0]
+                classes = trained_state["target_classes"]
+                probabilities = {classes[i]: round(float(proba_array[i]), 4) for i in range(len(classes))}
+            except Exception:
+                probabilities = None
+                
+        if trained_state["label_encoder"] is not None:
+            decoded_pred = trained_state["label_encoder"].inverse_transform([int(raw_pred)])[0]
+        else:
+            decoded_pred = raw_pred
+            
+        return {
+            "prediction": decoded_pred,
+            "raw_prediction": raw_pred,
+            "probabilities": probabilities,
+            "model_used": model_name,
+            "task_type": "classification",
+            "target_col": trained_state["target_col"]
+        }
+    else:
+        return {
+            "prediction": round(float(raw_pred), 2),
+            "raw_prediction": float(raw_pred),
+            "model_used": model_name,
+            "task_type": "regression",
+            "target_col": trained_state["target_col"]
+        }
+
+
+def predict_batch_students(trained_state: dict, batch_df: pd.DataFrame, model_name: str = None) -> tuple:
+    """
+    Predicts target values for a bulk uploaded CSV containing multiple students.
+    """
+    if model_name is None or model_name not in trained_state["pipelines"]:
+        model_name = trained_state["best_model_name"]
+        
+    pipeline = trained_state["pipelines"][model_name]
+    feature_cols = trained_state["feature_cols"]
+    target_col = trained_state["target_col"]
+    
+    # Check for missing feature columns
+    missing_cols = [c for c in feature_cols if c not in batch_df.columns]
+    if missing_cols:
+        return None, f"Uploaded batch file is missing required feature columns: {missing_cols}"
+        
+    X_batch = batch_df[feature_cols].copy()
+    raw_preds = pipeline.predict(X_batch)
+    
+    output_df = batch_df.copy()
+    pred_col_name = f"Predicted_{target_col}"
+    
+    if trained_state["task_type"] == "classification" and trained_state["label_encoder"] is not None:
+        decoded_preds = trained_state["label_encoder"].inverse_transform(raw_preds.astype(int))
+        output_df[pred_col_name] = decoded_preds
+    else:
+        if trained_state["task_type"] == "regression":
+            output_df[pred_col_name] = np.round(raw_preds, 2)
+        else:
+            output_df[pred_col_name] = raw_preds
+            
+    return output_df, None
+
+
+def get_feature_importances(trained_state: dict, model_name: str = None) -> pd.DataFrame:
+    """
+    Extracts feature importances or coefficients from the selected model.
+    """
+    if model_name is None or model_name not in trained_state["pipelines"]:
+        model_name = trained_state["best_model_name"]
+        
+    pipeline = trained_state["pipelines"][model_name]
+    model = pipeline.named_steps["model"]
+    preprocessor = pipeline.named_steps["preprocessor"]
+    
+    try:
+        # Get transformed feature names
+        feature_names = preprocessor.get_feature_names_out()
+        # Clean feature names (remove prefixes like num__ or cat__)
+        clean_names = [re.sub(r"^(num__|cat__)", "", name) for name in feature_names]
+    except Exception:
+        clean_names = trained_state["feature_cols"]
+        
+    importances = None
+    if hasattr(model, "feature_importances_"):
+        importances = model.feature_importances_
+    elif hasattr(model, "coef_"):
+        coef = model.coef_
+        if coef.ndim > 1:
+            # Multi-class: mean of absolute coefficients across classes
+            importances = np.mean(np.abs(coef), axis=0)
+        else:
+            importances = np.abs(coef)
+            
+    if importances is not None and len(importances) == len(clean_names):
+        df_imp = pd.DataFrame({
+            "Feature": clean_names,
+            "Importance": importances
+        }).sort_values(by="Importance", ascending=False).reset_index(drop=True)
+        return df_imp
+        
+    return pd.DataFrame()

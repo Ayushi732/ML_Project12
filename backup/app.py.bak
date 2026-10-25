@@ -1,0 +1,732 @@
+import os
+import sys
+import numpy as np
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report
+)
+
+# Ensure local src/ directory is in sys.path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+from src.ml_engine import (
+    detect_identifier_columns,
+    detect_task_type,
+    separate_feature_types,
+    train_supervised_models,
+    predict_single_student,
+    predict_batch_students,
+    get_feature_importances
+)
+
+# =========================================================
+# 1. PAGE CONFIGURATION & CLEAN MCA PROJECT STYLING
+# =========================================================
+
+st.set_page_config(
+    page_title="Dynamic Student Performance Prediction System",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Clean, professional styling suitable for an MCA College Project
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.1rem;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+    }
+    .sub-header {
+        font-size: 1.0rem;
+        opacity: 0.85;
+        margin-bottom: 1.4rem;
+    }
+    .prediction-badge-top {
+        background-color: rgba(16, 185, 129, 0.15);
+        color: #10B981;
+        padding: 10px 20px;
+        border-radius: 12px;
+        font-weight: 700;
+        font-size: 1.35rem;
+        display: inline-block;
+        border: 1px solid #10B981;
+    }
+    .prediction-badge-mid {
+        background-color: rgba(245, 158, 11, 0.15);
+        color: #F59E0B;
+        padding: 10px 20px;
+        border-radius: 12px;
+        font-weight: 700;
+        font-size: 1.35rem;
+        display: inline-block;
+        border: 1px solid #F59E0B;
+    }
+    .prediction-badge-risk {
+        background-color: rgba(239, 68, 68, 0.15);
+        color: #EF4444;
+        padding: 10px 20px;
+        border-radius: 12px;
+        font-weight: 700;
+        font-size: 1.35rem;
+        display: inline-block;
+        border: 1px solid #EF4444;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Set visualization style
+sns.set_theme(style="whitegrid", palette="muted")
+plt.rcParams.update({'font.sans-serif': 'DejaVu Sans', 'font.size': 10})
+
+# =========================================================
+# 2. SESSION STATE INITIALIZATION
+# =========================================================
+
+if "dataset" not in st.session_state:
+    st.session_state.dataset = None
+if "dataset_name" not in st.session_state:
+    st.session_state.dataset_name = "None"
+if "trained_state" not in st.session_state:
+    st.session_state.trained_state = None
+if "active_model_name" not in st.session_state:
+    st.session_state.active_model_name = None
+
+def reset_model_state():
+    """Invalidates previously trained model state when dataset changes."""
+    st.session_state.trained_state = None
+    st.session_state.active_model_name = None
+
+def load_dataset_into_state(df: pd.DataFrame, name: str):
+    """Loads a new dataset and safely resets model artifacts."""
+    st.session_state.dataset = df.copy()
+    st.session_state.dataset_name = name
+    reset_model_state()
+
+# =========================================================
+# 3. SIDEBAR NAVIGATION & STATUS
+# =========================================================
+
+with st.sidebar:
+    st.title("🎓 Project Information")
+    st.markdown("**Dynamic Student Performance Prediction**")
+    st.caption("Supervised Machine Learning System for Academic Outcomes")
+    
+    st.divider()
+    
+    st.subheader("📌 System Status")
+    if st.session_state.dataset is not None:
+        st.success(f"📁 Dataset: **{st.session_state.dataset_name}**")
+        st.write(f"📊 Rows: `{len(st.session_state.dataset):,}` | Cols: `{len(st.session_state.dataset.columns)}`")
+    else:
+        st.warning("⚠️ No dataset loaded yet.")
+        
+    if st.session_state.trained_state is not None:
+        t_state = st.session_state.trained_state
+        st.success(f"⚙️ Model: **{st.session_state.active_model_name}**")
+        st.write(f"🎯 Target: `{t_state['target_col']}`")
+        st.write(f"🏷️ Task: `{t_state['task_type'].title()}`")
+        st.write(f"🔢 Features: `{len(t_state['feature_cols'])}` selected")
+    else:
+        st.info("ℹ️ Model not trained yet.")
+        
+    st.divider()
+    
+    with st.expander("🔍 Historical Project Modules"):
+        st.markdown("""
+        **Legacy Unsupervised Module:**
+        - Original K-Means Clustering & PCA artifacts are preserved in `models/` and `visual_outputs/`.
+        - Historical student dataset available at `data/student_data.csv`.
+        """)
+        
+    st.caption("MCA College Project Submission")
+
+# =========================================================
+# 4. MAIN HEADER
+# =========================================================
+
+st.markdown('<div class="main-header">🎓 Dynamic Student Performance Prediction System</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Upload any Kaggle student dataset, dynamically select academic features and target goals, train supervised ML models, and predict marks, grades, or pass/fail outcomes.</div>', unsafe_allow_html=True)
+
+# 6 Required Tabs
+tab_dash, tab_upload, tab_train, tab_pred, tab_batch, tab_eval = st.tabs([
+    "🏠 Dashboard",
+    "📂 Upload Dataset",
+    "⚙️ Train Model",
+    "🔮 Predict Student Marks",
+    "📁 Batch Prediction",
+    "📊 Model Analytics"
+])
+
+# =========================================================
+# TAB 1: DASHBOARD
+# =========================================================
+
+with tab_dash:
+    st.subheader("System Overview & Quick Start")
+    
+    col_s1, col_s2, col_s3 = st.columns(3)
+    
+    with col_s1:
+        with st.container(border=True):
+            st.markdown("#### 1. Dataset Status")
+            if st.session_state.dataset is not None:
+                st.markdown(f"**Loaded:** `{st.session_state.dataset_name}`")
+                st.markdown(f"**Dimensions:** {len(st.session_state.dataset):,} rows × {len(st.session_state.dataset.columns)} cols")
+            else:
+                st.markdown("*No dataset uploaded. Please upload a CSV in Tab 2 or load a sample below.*")
+        
+    with col_s2:
+        with st.container(border=True):
+            st.markdown("#### 2. Configuration")
+            if st.session_state.trained_state is not None:
+                ts = st.session_state.trained_state
+                st.markdown(f"**Target:** `{ts['target_col']}` ({ts['task_type'].title()})")
+                st.markdown(f"**Features:** {len(ts['feature_cols'])} columns configured")
+            else:
+                st.markdown("*Target & features will be configured during training in Tab 3.*")
+        
+    with col_s3:
+        with st.container(border=True):
+            st.markdown("#### 3. Active Model")
+            if st.session_state.trained_state is not None:
+                st.markdown(f"**Algorithm:** `{st.session_state.active_model_name}`")
+                st.markdown(f"**Trained On:** {st.session_state.trained_state['train_size']} records (Ready)")
+            else:
+                st.markdown("*No active model. Train in Tab 3 to unlock predictions.*")
+        
+    st.write("")
+    st.subheader("⚡ Quick Start with Sample Datasets")
+    st.markdown("Test the entire dynamic pipeline immediately without downloading external files:")
+    
+    col_q1, col_q2, col_q3 = st.columns(3)
+    
+    with col_q1:
+        if st.button("📥 Load Kaggle Exam Scores (Regression)", use_container_width=True, type="secondary"):
+            sample_path = os.path.join(BASE_DIR, "data", "kaggle_student_performance_train.csv")
+            if os.path.exists(sample_path):
+                df_sample = pd.read_csv(sample_path)
+                load_dataset_into_state(df_sample, "Kaggle Exam Scores Dataset (Regression)")
+                st.success("Loaded Kaggle Exam Scores Dataset! Navigate to Tab 3 (Train Model) to train.")
+                st.rerun()
+            else:
+                st.error("Sample dataset file not found.")
+                
+    with col_q2:
+        if st.button("📥 Load Kaggle Grades / Pass-Fail (Classification)", use_container_width=True, type="secondary"):
+            sample_path = os.path.join(BASE_DIR, "data", "kaggle_student_performance_train.csv")
+            if os.path.exists(sample_path):
+                df_sample = pd.read_csv(sample_path)
+                load_dataset_into_state(df_sample, "Kaggle Grades & Pass-Fail Dataset (Classification)")
+                st.success("Loaded Kaggle Grades Dataset! Navigate to Tab 3 to train.")
+                st.rerun()
+            else:
+                st.error("Sample dataset file not found.")
+
+    with col_q3:
+        if st.button("📥 Load Original Marks & Attendance Dataset", use_container_width=True, type="secondary"):
+            sample_path = os.path.join(BASE_DIR, "data", "student_data.csv")
+            if os.path.exists(sample_path):
+                df_sample = pd.read_csv(sample_path)
+                load_dataset_into_state(df_sample, "Original Student Attendance & Marks (student_data.csv)")
+                st.success("Loaded Original Dataset! Navigate to Tab 3 to train.")
+                st.rerun()
+            else:
+                st.error("student_data.csv not found.")
+                
+    st.divider()
+    
+    st.subheader("📖 How to Download & Use Any Kaggle Dataset")
+    st.markdown("""
+    1. **Find a Student Dataset on Kaggle:** Search for `"Student Performance"`, `"Students Exam Scores"`, or `"Student Academic Performance"`.
+    2. **Download the CSV:** Download and extract the `.csv` file onto your machine.
+    3. **Upload in Tab 2:** Use the drag-and-drop uploader in **📂 Upload Dataset**.
+    4. **Select Features & Target in Tab 3:** Choose which column you want to predict (e.g. `Exam_Score`, `math score`, `Final_Grade`, or `Pass/Fail`).
+    5. **Train & Predict in Tabs 4 & 5:** The system automatically builds the appropriate preprocessing pipeline and trains the models!
+    """)
+
+# =========================================================
+# TAB 2: UPLOAD DATASET
+# =========================================================
+
+with tab_upload:
+    st.subheader("📂 Upload Dynamic Student Dataset")
+    st.markdown("Upload any CSV dataset containing student academic records, marks, study hours, or demographics.")
+    
+    uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"], help="Upload any student academic dataset")
+    
+    if uploaded_file is not None:
+        try:
+            df_new = pd.read_csv(uploaded_file)
+            if df_new.empty:
+                st.error("The uploaded CSV is empty. Please upload a file with records.")
+            else:
+                if len(df_new.columns) != len(set(df_new.columns)):
+                    df_new.columns = [f"{col}_{i}" if col in df_new.columns[:i] else col for i, col in enumerate(df_new.columns)]
+                    st.warning("Duplicate column names detected and automatically renamed.")
+                    
+                if st.session_state.dataset_name != uploaded_file.name or st.session_state.dataset is None:
+                    load_dataset_into_state(df_new, uploaded_file.name)
+                    st.success(f"Successfully uploaded and loaded: **{uploaded_file.name}**")
+                    st.info("Previous trained model artifacts have been cleared to ensure compatibility with your new dataset.")
+        except Exception as e:
+            st.error(f"Error reading CSV file: {e}")
+            
+    st.divider()
+    
+    if st.session_state.dataset is not None:
+        df = st.session_state.dataset
+        st.subheader(f"📊 Dataset Explorer: {st.session_state.dataset_name}")
+        
+        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+        num_cols, cat_cols = separate_feature_types(df, df.columns.tolist())
+        missing_count = int(df.isna().sum().sum())
+        
+        col_m1.metric("Total Records", f"{len(df):,}")
+        col_m2.metric("Total Columns", len(df.columns))
+        col_m3.metric("Numerical Columns", len(num_cols))
+        col_m4.metric("Categorical Columns", len(cat_cols))
+        col_m5.metric("Missing Cells", f"{missing_count:,}")
+        
+        st.write("")
+        st.markdown("**Preview (First 10 Rows):**")
+        st.dataframe(df.head(10), use_container_width=True)
+        
+        st.write("")
+        st.markdown("**Column Schema & Missing Values Analysis:**")
+        col_info = []
+        for col in df.columns:
+            non_null = int(df[col].notna().sum())
+            null_count = int(df[col].isna().sum())
+            null_pct = round((null_count / len(df)) * 100, 2)
+            dtype_str = str(df[col].dtype)
+            samples = ", ".join([str(v) for v in df[col].dropna().unique()[:3]])
+            col_info.append({
+                "Column Name": col,
+                "Data Type": dtype_str,
+                "Non-Null Count": non_null,
+                "Missing Count": null_count,
+                "Missing (%)": f"{null_pct}%",
+                "Sample Unique Values": samples
+            })
+        st.dataframe(pd.DataFrame(col_info), use_container_width=True)
+        
+        st.write("")
+        st.markdown("**Statistical Summary (Numerical Features):**")
+        if num_cols:
+            st.dataframe(df[num_cols].describe().round(2), use_container_width=True)
+        else:
+            st.info("No numerical columns found in this dataset.")
+    else:
+        st.info("No dataset currently active. Please upload a CSV file above or pick a sample from the Dashboard.")
+
+# =========================================================
+# TAB 3: TRAIN MODEL
+# =========================================================
+
+with tab_train:
+    st.subheader("⚙️ Dynamic Model Configuration & Training")
+    
+    if st.session_state.dataset is None:
+        st.warning("⚠️ No dataset loaded. Please upload a dataset in Tab 2 or load a sample from the Dashboard first.")
+    else:
+        df = st.session_state.dataset
+        all_cols = df.columns.tolist()
+        id_cols = detect_identifier_columns(df)
+        
+        st.markdown("Configure your target goal, input features, and training settings below.")
+        
+        col_c1, col_c2 = st.columns(2)
+        
+        with col_c1:
+            st.markdown("#### 1. Select Target Column")
+            target_col = st.selectbox(
+                "Choose the Target Column to Predict:",
+                options=all_cols,
+                index=len(all_cols) - 1,
+                help="Select the column you want the machine learning model to predict (e.g. Exam_Score, Final_Marks, Grade, Pass/Fail)"
+            )
+            
+            detected_task_info = detect_task_type(df, target_col)
+            detected_task = detected_task_info["task"]
+            
+            st.info(f"💡 **Auto-Detected Task:** `{detected_task.upper()}`\n\n{detected_task_info['reason']}")
+            
+            task_type_override = st.radio(
+                "Confirm or Override Task Type:",
+                options=["Regression (Numerical Marks / Continuous Scores)", "Classification (Grades / Pass-Fail / Categories)"],
+                index=0 if detected_task == "regression" else 1,
+                help="Switch between Regression and Classification if you wish to treat discrete numbers as categories or vice versa."
+            )
+            chosen_task = "regression" if "Regression" in task_type_override else "classification"
+            
+        with col_c2:
+            st.markdown("#### 2. Select Input Features")
+            candidate_features = [c for c in all_cols if c != target_col]
+            default_features = [c for c in candidate_features if c not in id_cols]
+            
+            if id_cols:
+                st.caption(f"🛡️ Auto-excluded ID/Identifier columns by default: `{', '.join(id_cols)}`")
+                
+            col_b_sel1, col_b_sel2 = st.columns(2)
+            with col_b_sel1:
+                select_all = st.button("Select All Features", key="btn_sel_all")
+            with col_b_sel2:
+                clear_all = st.button("Deselect All", key="btn_clr_all")
+                
+            if select_all:
+                current_selected = candidate_features
+            elif clear_all:
+                current_selected = []
+            else:
+                current_selected = default_features
+                
+            selected_features = st.multiselect(
+                "Choose Input Feature Columns:",
+                options=candidate_features,
+                default=current_selected,
+                help="Select columns to use as predictors (e.g. attendance, study hours, previous scores)"
+            )
+            
+            num_selected, cat_selected = separate_feature_types(df, selected_features)
+            st.write(f"Selected: **{len(selected_features)}** features ({len(num_selected)} numerical, {len(cat_selected)} categorical)")
+
+        st.write("")
+        st.markdown("#### 3. Hyperparameters & Model Selection")
+        col_p1, col_p2, col_p3 = st.columns(3)
+        
+        with col_p1:
+            test_size_val = st.slider("Test Split Size (%):", min_value=10, max_value=40, value=20, step=5) / 100.0
+        with col_p2:
+            random_seed = st.number_input("Random State (Reproducibility):", value=42, step=1)
+        with col_p3:
+            model_training_mode = st.selectbox(
+                "Algorithm Execution:",
+                options=["Train & Benchmark All 3 Models (Recommended)", "Train Single Selected Model"]
+            )
+
+        st.write("")
+        train_button = st.button("🚀 Train Machine Learning Models", type="primary", use_container_width=True)
+        
+        if train_button:
+            if not selected_features:
+                st.error("Please select at least one input feature column to train.")
+            elif target_col in selected_features:
+                st.error("Target column cannot also be an input feature. Please deselect it.")
+            else:
+                with st.spinner("Preprocessing features, fitting pipelines, and benchmarking models..."):
+                    try:
+                        trained_state = train_supervised_models(
+                            df=df,
+                            feature_cols=selected_features,
+                            target_col=target_col,
+                            task_type=chosen_task,
+                            test_size=test_size_val,
+                            random_state=int(random_seed)
+                        )
+                        st.session_state.trained_state = trained_state
+                        st.session_state.active_model_name = trained_state["best_model_name"]
+                        st.success(f"✅ Model training completed successfully! Trained on {trained_state['train_size']} records, evaluated on {trained_state['test_size']} test records.")
+                    except Exception as e:
+                        st.error(f"Training failed: {e}")
+                        
+        if st.session_state.trained_state is not None:
+            ts = st.session_state.trained_state
+            st.divider()
+            st.subheader("🏆 Model Benchmark Leaderboard")
+            
+            st.markdown(f"**Recommended Model:** 🥇 **{ts['best_model_name']}**")
+            st.dataframe(ts["metrics_df"], use_container_width=True)
+            
+            st.write("")
+            chosen_active_model = st.selectbox(
+                "Select Active Model for Prediction & Analysis:",
+                options=list(ts["pipelines"].keys()),
+                index=list(ts["pipelines"].keys()).index(st.session_state.active_model_name)
+            )
+            st.session_state.active_model_name = chosen_active_model
+            st.info(f"Using **{chosen_active_model}** for single student predictions in Tab 4 and batch predictions in Tab 5.")
+
+# =========================================================
+# TAB 4: PREDICT STUDENT MARKS
+# =========================================================
+
+with tab_pred:
+    st.subheader("🔮 Predict a New Student's Performance")
+    
+    if st.session_state.trained_state is None:
+        st.warning("⚠️ No machine learning model has been trained yet. Please train a model in Tab 3 (Train Model) first.")
+    else:
+        ts = st.session_state.trained_state
+        df = st.session_state.dataset
+        active_model = st.session_state.active_model_name
+        
+        st.markdown(f"Enter the student details below to predict **{ts['target_col']}** using **{active_model}**.")
+        
+        student_inputs = {}
+        feature_cols = ts["feature_cols"]
+        cols_grid = st.columns(3)
+        
+        for idx, col in enumerate(feature_cols):
+            grid_col = cols_grid[idx % 3]
+            with grid_col:
+                if col in ts["numeric_cols"]:
+                    col_series = df[col].dropna()
+                    min_val = float(col_series.min()) if not col_series.empty else 0.0
+                    max_val = float(col_series.max()) if not col_series.empty else 100.0
+                    mean_val = float(col_series.mean()) if not col_series.empty else 50.0
+                    
+                    student_inputs[col] = st.number_input(
+                        f"📝 {col}:",
+                        value=round(mean_val, 2),
+                        min_value=round(min_val - 1.0, 2),
+                        max_value=round(max_val + 10.0, 2),
+                        key=f"single_num_{col}"
+                    )
+                else:
+                    unique_vals = sorted([str(x) for x in df[col].dropna().unique()])
+                    student_inputs[col] = st.selectbox(
+                        f"📋 {col}:",
+                        options=unique_vals if unique_vals else ["Unknown"],
+                        key=f"single_cat_{col}"
+                    )
+                    
+        st.write("")
+        predict_single_btn = st.button("🔍 Predict Student Outcome", type="primary", use_container_width=True)
+        
+        if predict_single_btn:
+            try:
+                pred_result = predict_single_student(ts, student_inputs, model_name=active_model)
+                st.divider()
+                st.subheader("🎯 Prediction Result")
+                
+                col_res1, col_res2 = st.columns([2, 1])
+                
+                with col_res1:
+                    if pred_result["task_type"] == "regression":
+                        pred_val = pred_result["prediction"]
+                        badge_class = "prediction-badge-top" if pred_val >= 75 else ("prediction-badge-mid" if pred_val >= 50 else "prediction-badge-risk")
+                        
+                        st.markdown(f'<div class="{badge_class}">Predicted {ts["target_col"]}: {pred_val}</div>', unsafe_allow_html=True)
+                        st.write("")
+                        st.write(f"Predicted by: **{pred_result['model_used']}**")
+                        
+                        if 0 <= pred_val <= 100:
+                            st.progress(float(pred_val / 100.0))
+                            st.caption(f"Score Scale: {pred_val:.1f}%")
+                    else:
+                        pred_class = str(pred_result["prediction"])
+                        is_pass = "pass" in pred_class.lower() or pred_class in ["A", "B", "1"]
+                        badge_class = "prediction-badge-top" if is_pass else "prediction-badge-risk"
+                        
+                        st.markdown(f'<div class="{badge_class}">Predicted {ts["target_col"]}: {pred_class}</div>', unsafe_allow_html=True)
+                        st.write("")
+                        st.write(f"Predicted by: **{pred_result['model_used']}**")
+                        
+                        if pred_result["probabilities"] is not None:
+                            st.write("**Class Probability Breakdown:**")
+                            prob_df = pd.DataFrame(list(pred_result["probabilities"].items()), columns=["Class", "Probability"])
+                            st.dataframe(prob_df, use_container_width=True)
+                            
+                with col_res2:
+                    st.markdown("**Student Input Summary:**")
+                    st.json(student_inputs)
+            except Exception as e:
+                st.error(f"Prediction failed: {e}")
+
+# =========================================================
+# TAB 5: BATCH PREDICTION
+# =========================================================
+
+with tab_batch:
+    st.subheader("📁 Batch Student Prediction (CSV Upload)")
+    st.markdown("""
+    Upload a CSV containing records for multiple students.  
+    The file **does not need to contain the target column**. The model will apply the learned preprocessing pipeline and predict outcomes for every row.
+    """)
+    
+    if st.session_state.trained_state is None:
+        st.warning("⚠️ Please train a model in Tab 3 (Train Model) before performing batch predictions.")
+    else:
+        ts = st.session_state.trained_state
+        active_model = st.session_state.active_model_name
+        
+        st.markdown(f"**Required Feature Columns:** `{', '.join(ts['feature_cols'])}`")
+        
+        col_bu1, col_bu2 = st.columns([2, 1])
+        with col_bu1:
+            batch_file = st.file_uploader("Upload Batch CSV", type=["csv"], key="batch_uploader")
+        with col_bu2:
+            st.write("")
+            st.write("")
+            use_test_batch = st.button("✨ Use Test Split as Sample Batch", help="Quickly test batch prediction using unseen test records")
+            
+        batch_df = None
+        if batch_file is not None:
+            try:
+                batch_df = pd.read_csv(batch_file)
+            except Exception as e:
+                st.error(f"Error reading batch CSV: {e}")
+        elif use_test_batch:
+            batch_df = ts["X_test"].copy()
+            st.info(f"Loaded {len(batch_df)} test split records as a sample batch.")
+            
+        if batch_df is not None:
+            st.divider()
+            with st.spinner("Processing batch predictions..."):
+                output_batch_df, error_msg = predict_batch_students(ts, batch_df, model_name=active_model)
+                
+                if error_msg:
+                    st.error(error_msg)
+                else:
+                    st.success(f"✅ Generated predictions for all **{len(output_batch_df)}** student records using **{active_model}**!")
+                    
+                    pred_col_name = f"Predicted_{ts['target_col']}"
+                    
+                    if ts["task_type"] == "regression":
+                        col_stat1, col_stat2, col_stat3 = st.columns(3)
+                        col_stat1.metric("Average Predicted", f"{output_batch_df[pred_col_name].mean():.2f}")
+                        col_stat2.metric("Highest Predicted", f"{output_batch_df[pred_col_name].max():.2f}")
+                        col_stat3.metric("Lowest Predicted", f"{output_batch_df[pred_col_name].min():.2f}")
+                    else:
+                        st.markdown("**Predicted Distribution:**")
+                        class_counts = output_batch_df[pred_col_name].value_counts().reset_index()
+                        class_counts.columns = ["Class", "Count"]
+                        st.dataframe(class_counts, use_container_width=True)
+                        
+                    st.dataframe(output_batch_df, use_container_width=True)
+                    
+                    csv_export = output_batch_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Download Classified Student Batch Report (CSV)",
+                        data=csv_export,
+                        file_name=f"batch_predictions_{ts['target_col']}.csv",
+                        mime="text/csv",
+                        type="primary"
+                    )
+
+# =========================================================
+# TAB 6: MODEL ANALYTICS
+# =========================================================
+
+with tab_eval:
+    st.subheader("📊 Model Evaluation & Analytics Dashboard")
+    
+    if st.session_state.trained_state is None:
+        st.warning("⚠️ No trained model available. Please train a model in Tab 3 to view analytics.")
+    else:
+        ts = st.session_state.trained_state
+        active_model = st.session_state.active_model_name
+        pipeline = ts["pipelines"][active_model]
+        
+        y_test = ts["y_test"]
+        y_pred = ts["predictions_dict"][active_model]
+        
+        st.markdown(f"Evaluation metrics for **{active_model}** evaluated on **{ts['test_size']} unseen test records**:")
+        
+        if ts["task_type"] == "regression":
+            mae = mean_absolute_error(y_test, y_pred)
+            mse = mean_squared_error(y_test, y_pred)
+            rmse = float(np.sqrt(mse))
+            r2 = r2_score(y_test, y_pred)
+            
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            col_m1.metric("MAE (Mean Absolute Error)", f"{mae:.3f}")
+            col_m2.metric("MSE (Mean Squared Error)", f"{mse:.3f}")
+            col_m3.metric("RMSE (Root Mean Squared)", f"{rmse:.3f}")
+            col_m4.metric("R² Score (Variance Explained)", f"{r2:.4f}")
+            
+            st.divider()
+            
+            col_plot1, col_plot2 = st.columns(2)
+            
+            with col_plot1:
+                fig, ax = plt.subplots(figsize=(6, 5))
+                ax.scatter(y_test, y_pred, alpha=0.7, color="#1E3A8A", edgecolors="k", s=45)
+                min_val = min(float(y_test.min()), float(y_pred.min()))
+                max_val = max(float(y_test.max()), float(y_pred.max()))
+                ax.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="Ideal Fit (y = x)")
+                ax.set_title("Actual vs. Predicted Student Marks", fontweight="bold")
+                ax.set_xlabel("Actual Marks (Test Set)")
+                ax.set_ylabel("Predicted Marks")
+                ax.legend()
+                st.pyplot(fig)
+                plt.close()
+                
+            with col_plot2:
+                fig, ax = plt.subplots(figsize=(6, 5))
+                residuals = y_test - y_pred
+                sns.histplot(residuals, kde=True, ax=ax, color="#059669", bins=15)
+                ax.axvline(0, color="r", linestyle="--")
+                ax.set_title("Residual (Error) Distribution", fontweight="bold")
+                ax.set_xlabel("Prediction Error (Actual - Predicted)")
+                st.pyplot(fig)
+                plt.close()
+                
+        else:
+            acc = accuracy_score(y_test, y_pred)
+            prec = precision_score(y_test, y_pred, average="weighted", zero_division=0)
+            rec = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+            f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+            
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            col_m1.metric("Accuracy", f"{acc:.4f}")
+            col_m2.metric("Precision (Weighted)", f"{prec:.4f}")
+            col_m3.metric("Recall (Weighted)", f"{rec:.4f}")
+            col_m4.metric("F1-Score (Weighted)", f"{f1:.4f}")
+            
+            st.divider()
+            
+            col_plot1, col_plot2 = st.columns([1, 1])
+            
+            with col_plot1:
+                classes = ts["target_classes"]
+                cm = confusion_matrix(y_test, y_pred)
+                fig, ax = plt.subplots(figsize=(6, 5))
+                sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=classes, yticklabels=classes, ax=ax)
+                ax.set_title("Confusion Matrix Heatmap", fontweight="bold")
+                ax.set_xlabel("Predicted Class")
+                ax.set_ylabel("True Class")
+                st.pyplot(fig)
+                plt.close()
+                
+            with col_plot2:
+                st.markdown("**Classification Report Breakdown:**")
+                report_dict = classification_report(y_test, y_pred, target_names=[str(c) for c in classes], output_dict=True, zero_division=0)
+                report_df = pd.DataFrame(report_dict).transpose().round(3)
+                st.dataframe(report_df, use_container_width=True)
+                
+        st.divider()
+        
+        st.subheader("🔍 Feature Importance / Drivers of Performance")
+        df_imp = get_feature_importances(ts, model_name=active_model)
+        
+        if not df_imp.empty:
+            fig, ax = plt.subplots(figsize=(10, max(4, len(df_imp) * 0.35)))
+            top_imp = df_imp.head(15).iloc[::-1]
+            ax.barh(top_imp["Feature"], top_imp["Importance"], color="#2563EB", edgecolor="k", alpha=0.85)
+            ax.set_title(f"Top Predictive Features ({active_model})", fontweight="bold")
+            ax.set_xlabel("Relative Importance / Weight")
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+        else:
+            st.info(f"Feature importance visualization is not directly applicable for {active_model}.")
+            
+        st.write("")
+        st.caption("ℹ️ **Academic Disclaimer:** Evaluation metrics are empirical estimates calculated on an unseen test holdout split. Generalization performance on future cohorts depends on consistent academic distributions.")
